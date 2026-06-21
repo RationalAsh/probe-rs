@@ -40,15 +40,43 @@ struct JtagAdapter {
 
     command: Command,
     commands: Vec<u8>,
+
+    /// For each command that captures bits, stores how many bits are captured.
     in_bit_counts: Vec<usize>,
     in_bits: BitVec,
     ftdi: FtdiProperties,
 }
 
 impl JtagAdapter {
-    fn open(ftdi: FtdiDevice, usb_device: DeviceInfo) -> Result<Self, DebugProbeError> {
+    /// Map a USB interface number from `--probe VID:PID-INTERFACE` to an FTDI channel.
+    ///
+    /// Multi-channel FTDI chips (FT2232H, FT4232H) expose each channel as a
+    /// separate USB interface. The mapping is: 0 = Channel A, 1 = Channel B,
+    /// 2 = Channel C, 3 = Channel D. Defaults to Channel A when no interface
+    /// is specified.
+    fn map_interface(usb_interface: Option<u8>) -> ftdaye::Interface {
+        match usb_interface {
+            Some(0) | None => ftdaye::Interface::A,
+            Some(1) => ftdaye::Interface::B,
+            Some(2) => ftdaye::Interface::C,
+            Some(3) => ftdaye::Interface::D,
+            Some(n) => {
+                tracing::warn!(
+                    "FTDI interface number {n} is out of range (0..=3), defaulting to Channel A"
+                );
+                ftdaye::Interface::A
+            }
+        }
+    }
+
+    fn open(
+        ftdi: FtdiDevice,
+        usb_device: DeviceInfo,
+        usb_interface: Option<u8>,
+    ) -> Result<Self, DebugProbeError> {
+        let interface = Self::map_interface(usb_interface);
         let device = ftdaye::Builder::new()
-            .with_interface(ftdaye::Interface::A)
+            .with_interface(interface)
             .with_read_timeout(Duration::from_secs(5))
             .with_write_timeout(Duration::from_secs(5))
             .usb_open(usb_device)?;
@@ -154,10 +182,12 @@ impl JtagAdapter {
         }
 
         let mut t0 = Instant::now();
-        let timeout = Duration::from_millis(10);
+        let timeout = Duration::from_millis(100);
 
-        let mut reply = Vec::with_capacity(self.in_bit_counts.len());
-        while reply.len() < self.in_bit_counts.len() {
+        let expected_bits = std::mem::take(&mut self.in_bit_counts);
+        let reply_slots = expected_bits.len();
+        let mut reply = Vec::with_capacity(reply_slots);
+        while reply.len() < reply_slots {
             let read = self
                 .device
                 .read_to_end(&mut reply)
@@ -168,24 +198,20 @@ impl JtagAdapter {
             }
 
             if t0.elapsed() > timeout {
-                tracing::warn!(
-                    "Read {} bytes, expected {}",
-                    reply.len(),
-                    self.in_bit_counts.len()
-                );
+                tracing::warn!("Read {} bytes, expected {}", reply.len(), reply_slots);
                 return Err(DebugProbeError::Timeout);
             }
         }
 
-        if reply.len() != self.in_bit_counts.len() {
+        if reply.len() != reply_slots {
             return Err(DebugProbeError::Other(format!(
                 "Read more data than expected. Expected {} bytes, got {} bytes",
-                self.in_bit_counts.len(),
+                reply_slots,
                 reply.len()
             )));
         }
 
-        for (byte, count) in reply.into_iter().zip(self.in_bit_counts.drain(..)) {
+        for (byte, count) in reply.into_iter().zip(expected_bits.into_iter()) {
             let bits = byte >> (8 - count);
             self.in_bits
                 .extend_from_bitslice(&bits.view_bits::<Lsb0>()[..count]);
@@ -300,7 +326,7 @@ impl ProbeFactory for FtdiProbeFactory {
         }
 
         let probe = FtdiProbe {
-            adapter: JtagAdapter::open(ftdi, probes.pop().unwrap())?,
+            adapter: JtagAdapter::open(ftdi, probes.pop().unwrap(), selector.interface)?,
             jtag_state: JtagDriverState::default(),
             swd_settings: SwdSettings::default(),
         };
@@ -310,6 +336,33 @@ impl ProbeFactory for FtdiProbeFactory {
 
     fn list_probes(&self) -> Vec<DebugProbeInfo> {
         list_ftdi_devices()
+    }
+
+    fn list_probes_filtered(&self, selector: Option<&DebugProbeSelector>) -> Vec<DebugProbeInfo> {
+        // FTDI probes are enumerated as one entry per USB device. The interface/channel
+        // (A/B/C/D) is not stored in DebugProbeInfo; it is a runtime selection passed
+        // through to open(). The default list_probes_filtered() filters by interface,
+        // which causes "no probe found" when the user specifies e.g. `--probe VID:PID-1`
+        // to select Channel B on an FT2232H, because interface is always None in the
+        // listed entries.
+        //
+        // Match only on VID, PID, and (optionally) serial number, ignoring interface.
+        self.list_probes()
+            .into_iter()
+            .filter(|probe| {
+                selector.as_ref().is_none_or(|s| {
+                    probe.vendor_id == s.vendor_id
+                        && probe.product_id == s.product_id
+                        && s.serial_number.as_ref().is_none_or(|sn| {
+                            if let Some(probe_sn) = &probe.serial_number {
+                                probe_sn == sn
+                            } else {
+                                sn.is_empty()
+                            }
+                        })
+                })
+            })
+            .collect()
     }
 }
 

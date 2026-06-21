@@ -110,11 +110,11 @@ fn examine_memory(
     // 1. Specified address
     // 2. Frame address
     // 3. Program counter
-    let mut input_address = 0_u64;
+    let mut input_address = None;
 
     for input_argument in input_arguments {
         if let Ok(MemoryAddress(addr)) = MemoryAddress::try_from(input_argument) {
-            input_address = addr;
+            input_address = Some(addr);
         } else if input_argument.starts_with('/') {
             let Some(gdb_nuf_string) = input_argument.strip_prefix('/') else {
                 return Err(DebuggerError::UserMessage(
@@ -135,18 +135,31 @@ fn examine_memory(
                         "Format specifier : {}, is not valid here.\nPlease select one of the supported formats:\n{error}", gdb_nuf.format_specifier
                     ))
                 })?;
+        } else if let Some(reg) = input_argument.strip_prefix('$') {
+            let Some(register) = target_core.core.registers().all_registers().find(|r| {
+                std::iter::once(r.name().to_string())
+                    .chain(r.roles.iter().map(|role| role.to_string()))
+                    .any(|name| name.eq_ignore_ascii_case(reg))
+            }) else {
+                return Err(DebuggerError::UserMessage(format!(
+                    "Undefined register ${reg:?}."
+                )));
+            };
+            input_address = Some(target_core.core.read_core_reg(register)?);
         } else {
             return Err(DebuggerError::UserMessage(
                 "Invalid parameters. See the `help` command for more information.".to_string(),
             ));
         }
     }
-    if input_address == 0 {
+    let input_address = if let Some(input_address) = input_address {
+        input_address
+    } else {
         // No address was specified, so we'll use the frame address, if available.
 
         let frame_id = request_arguments.frame_id.map(ObjectRef::from);
 
-        input_address = if let Some(frame_pc) = frame_id
+        if let Some(frame_pc) = frame_id
             .and_then(|frame_id| {
                 target_core
                     .core_data
@@ -162,7 +175,7 @@ fn examine_memory(
                 .core
                 .read_core_reg(target_core.core.program_counter())?
         }
-    }
+    };
 
     memory_read(input_address, gdb_nuf, target_core)
 }

@@ -14,7 +14,7 @@ use super::{
     },
     repl_commands::ReplCommand,
     repl_types::*,
-    request_helpers::disassemble_target_memory,
+    request_helpers::{DisassemblyAmount, disassemble_target_memory},
 };
 
 /// Format the `variable` and add it to the `response_body.result` for display to the user.
@@ -113,7 +113,7 @@ pub(crate) fn memory_read(
             0_i64,
             0_i64,
             address,
-            gdb_nuf.unit_count as i64,
+            DisassemblyAmount::Instructions(gdb_nuf.unit_count as i64),
         )?;
         if assembly_lines.is_empty() {
             return Err(DebuggerError::UserMessage(format!(
@@ -334,7 +334,7 @@ mod test {
             &[
                 (
                     "break ",
-                    "break [*address]: Sets a breakpoint specified location, or next instruction if unspecified.",
+                    "break [*address | file:line[:column]]: Set a breakpoint at a location, or halt the target if unspecified.",
                 ),
                 (
                     "bt ",
@@ -348,14 +348,14 @@ mod test {
             "br",
             &[(
                 "break ",
-                "break [*address]: Sets a breakpoint specified location, or next instruction if unspecified.",
+                "break [*address | file:line[:column]]: Set a breakpoint at a location, or halt the target if unspecified.",
             )],
         );
         assert_completion_result(
             "break",
             &[(
                 "break ",
-                "break [*address]: Sets a breakpoint specified location, or next instruction if unspecified.",
+                "break [*address | file:line[:column]]: Set a breakpoint at a location, or halt the target if unspecified.",
             )],
         );
         assert_completion_result(

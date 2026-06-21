@@ -2,13 +2,13 @@ use std::time::Duration;
 
 use crate::{
     rpc::{
-        Key, ObjectStorage,
+        Key, ObjectStorageSlot,
         functions::{
             MonitorEndpoint, MultiTopicPublisher, MultiTopicWriter, RpcResult, RpcSpawnContext,
             RttTopic, SemihostingTopic, WireTxImpl, flash::BootInfo,
         },
         utils::{
-            run_loop::{ReturnReason, RunLoop, RunLoopPoller},
+            run_loop::{ReturnReason, RunLoop, RunLoopPoller, VectorCatchConfig},
             semihosting::{SemihostingFileManager, SemihostingOptions},
         },
     },
@@ -51,6 +51,10 @@ pub struct MonitorOptions {
     pub catch_reset: bool,
     /// Enable hardfault vector catch if its supported on the target.
     pub catch_hardfault: bool,
+    /// Enable SVC vector catch (ARMv7-A/R only).
+    pub catch_svc: bool,
+    /// Enable HLT vector catch (ARMv7-A/R only).
+    pub catch_hlt: bool,
     /// RTT client if used.
     pub rtt_client: Option<Key<RttClient>>,
     /// Configure the support for semihosting.
@@ -207,7 +211,7 @@ fn monitor_impl(
     }
 
     let poller = client_key.map(|client| RttPoller {
-        rtt_client: client,
+        rtt_client: shared_session.object_storage().cell(client),
         clear_control_block: request.mode.should_clear_rtt_header(),
         sender: |message| {
             sender
@@ -218,8 +222,12 @@ fn monitor_impl(
 
     let exit_reason = run_loop.run_until(
         &shared_session,
-        request.options.catch_hardfault,
-        request.options.catch_reset,
+        VectorCatchConfig {
+            catch_hardfault: request.options.catch_hardfault,
+            catch_reset: request.options.catch_reset,
+            catch_svc: request.options.catch_svc,
+            catch_hlt: request.options.catch_hlt,
+        },
         poller,
         None,
         |halt_reason, core| semihosting_sink.handle_halt(halt_reason, core),
@@ -237,7 +245,7 @@ pub struct RttPoller<S>
 where
     S: FnMut(RttEvent) -> anyhow::Result<()>,
 {
-    pub rtt_client: Key<RttClient>,
+    pub rtt_client: ObjectStorageSlot<RttClient>,
     pub clear_control_block: bool,
     pub sender: S,
 }
@@ -246,16 +254,16 @@ impl<S> RunLoopPoller for RttPoller<S>
 where
     S: FnMut(RttEvent) -> anyhow::Result<()>,
 {
-    fn start(&mut self, objs: &ObjectStorage, core: &mut Core<'_>) -> anyhow::Result<()> {
+    fn start(&mut self, core: &mut Core<'_>) -> anyhow::Result<()> {
         if self.clear_control_block {
-            let mut rtt_client = objs.object_mut_blocking(self.rtt_client);
+            let mut rtt_client = self.rtt_client.get_blocking();
             rtt_client.clear_control_block(core)?;
         }
         Ok(())
     }
 
-    fn poll(&mut self, objs: &ObjectStorage, core: &mut Core<'_>) -> anyhow::Result<Duration> {
-        let mut rtt_client = objs.object_mut_blocking(self.rtt_client);
+    fn poll(&mut self, core: &mut Core<'_>) -> anyhow::Result<Duration> {
+        let mut rtt_client = self.rtt_client.get_blocking();
         if !rtt_client.is_attached() && matches!(rtt_client.try_attach(core), Ok(true)) {
             tracing::debug!("Attached to RTT");
             let up_channels = rtt_client
@@ -300,8 +308,8 @@ where
         Ok(next_poll)
     }
 
-    fn exit(&mut self, objs: &ObjectStorage, core: &mut Core<'_>) -> anyhow::Result<()> {
-        let mut rtt_client = objs.object_mut_blocking(self.rtt_client);
+    fn exit(&mut self, core: &mut Core<'_>) -> anyhow::Result<()> {
+        let mut rtt_client = self.rtt_client.get_blocking();
         rtt_client.clean_up(core)?;
         Ok(())
     }

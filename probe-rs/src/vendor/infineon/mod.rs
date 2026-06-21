@@ -11,7 +11,10 @@ use crate::{
     },
     config::{DebugSequence, Registry},
     error::Error,
-    vendor::{Vendor, infineon::sequences::xmc4000::XMC4000},
+    vendor::{
+        Vendor,
+        infineon::sequences::{psoc_edge, tle::InfineonTle, xmc4000::XMC4000},
+    },
 };
 
 pub mod sequences;
@@ -27,6 +30,12 @@ impl Vendor for Infineon {
     fn try_create_debug_sequence(&self, chip: &Chip) -> Option<DebugSequence> {
         let sequence = if chip.name.starts_with("XMC4") {
             DebugSequence::Arm(XMC4000::create())
+        } else if chip.name.starts_with("PSE84") {
+            DebugSequence::Arm(psoc_edge::PsocEdge::create(chip))
+        } else if chip.name.starts_with("TLE98") || chip.name.starts_with("TLE99") {
+            // MOTIX™ TLE98xx/TLE99xx motor-control MCUs gate SWD behind their
+            // BootROM and need a special debug-mode entry sequence.
+            DebugSequence::Arm(InfineonTle::create())
         } else {
             return None;
         };
